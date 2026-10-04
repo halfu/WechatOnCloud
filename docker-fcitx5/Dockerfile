@@ -26,5 +26,8 @@ COPY profile /etc/xdg/fcitx5/profile
 COPY autostart /etc/xdg/openbox/autostart
 COPY fcitx5.sh /etc/profile.d/fcitx5.sh
 COPY startwm.sh /defaults/startwm.sh
+COPY patch-qq.py /tmp/patch-qq.py
+
+RUN python3 /tmp/patch-qq.py && rm -f /tmp/patch-qq.py
 
 RUN chmod +x /etc/xdg/openbox/autostart /defaults/startwm.sh
