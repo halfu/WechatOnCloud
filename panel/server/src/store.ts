@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from 'node:fs';
+import { chmodSync, readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
 import bcrypt from 'bcryptjs';
@@ -26,12 +26,13 @@ export interface User {
 const DEFAULT_ADMIN_PASSWORD = 'wechat';
 
 // v1.2.0：实例可承载多种应用（不止微信）。同一镜像运行时按 appType 安装/启动对应应用。
-export type AppType = 'wechat' | 'telegram' | 'chromium' | 'custom';
-export const APP_TYPES: AppType[] = ['wechat', 'telegram', 'chromium', 'custom'];
+export type AppType = 'wechat' | 'telegram' | 'chromium' | 'qq' | 'custom';
+export const APP_TYPES: AppType[] = ['wechat', 'telegram', 'chromium', 'qq', 'custom'];
 export const APP_LABELS: Record<AppType, string> = {
   wechat: '微信',
   telegram: 'Telegram',
-  chromium: '浏览器',
+  chromium: 'Chromium', // 与前端新建实例时的选项名一致（自动命名用）
+  qq: 'QQ',
   custom: '自定义应用',
 };
 // 向后兼容：v1.2.0 之前创建的实例没有 appType 字段，一律视为微信。
@@ -77,10 +78,11 @@ const FILE = process.env.PANEL_DATA || '/data/panel/accounts.json';
 let data: Data = { users: [], instances: [] };
 
 function persist() {
-  mkdirSync(dirname(FILE), { recursive: true });
+  mkdirSync(dirname(FILE), { recursive: true, mode: 0o700 });
   const tmp = `${FILE}.tmp`;
-  writeFileSync(tmp, JSON.stringify(data, null, 2));
+  writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
   renameSync(tmp, FILE);
+  chmodSync(FILE, 0o600);
 }
 
 function makeUser(username: string, password: string, role: Role): User {
@@ -312,6 +314,15 @@ function parseIdFromVolume(volumeName: string): string | null {
   return m ? m[1] : null;
 }
 
+// 名称留空时自动命名：「微信 1」「微信 2」……取第一个没被占用的编号
+function autoInstanceName(type: AppType): string {
+  const used = new Set(data.instances.map((i) => i.name));
+  for (let n = 1; ; n++) {
+    const name = `${APP_LABELS[type]} ${n}`;
+    if (!used.has(name)) return name;
+  }
+}
+
 export function createInstance(
   name: string,
   createdBy: string,
@@ -331,7 +342,7 @@ export function createInstance(
   }
   const inst: Instance = {
     id,
-    name: name.trim() || `${APP_LABELS[type]}-${id.slice(0, 4)}`,
+    name: name.trim() || autoInstanceName(type),
     appType: type,
     containerName: `woc-wx-${id}`,
     volumeName,

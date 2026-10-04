@@ -1,3 +1,5 @@
+import { isIP } from 'node:net';
+
 // Host-header allowlist for DNS-rebinding protection.
 //
 // Background: the panel binds 0.0.0.0:8080 and ships default credentials
@@ -52,6 +54,33 @@ export function isPrivateIpv4(host: string): boolean {
   if (o[0] === 192 && o[1] === 168) return true;
   // 169.254.0.0/16 (link-local)
   if (o[0] === 169 && o[1] === 254) return true;
+  // 100.64.0.0/10 (CGNAT)：Tailscale/Headscale 给节点分配的就是这一段，
+  // 组网后用 100.x.y.z 访问面板属于「等价于内网」的正常用法，此前被误拒（issue #124 评论）。
+  if (o[0] === 100 && o[1] >= 64 && o[1] <= 127) return true;
+  return false;
+}
+
+// 内网 IPv6 字面量。此前只放行 ::1，导致纯 IPv6 内网 / Tailscale IPv6（fd7a:115c:a1e0::/48）
+// 访问面板一律 400。覆盖 fc00::/7（ULA，含 Tailscale）与 fe80::/10（链路本地）。
+// 安全性同 RFC1918：校验的是 Host 头字面量，DNS-rebinding 攻击者的 Host 是自己的域名，匹配不上。
+export function isPrivateIpv6(host: string): boolean {
+  let h = host;
+  if (h.startsWith('[') && h.endsWith(']')) h = h.slice(1, -1);
+  const zone = h.indexOf('%'); // fe80::1%eth0 的 zone id
+  if (zone >= 0) h = h.slice(0, zone);
+  h = h.toLowerCase();
+  if (!h.includes(':') || !/^[0-9a-f:]+$/.test(h)) return false;
+  const first = h.split(':')[0];
+  if (!first) return false; // "::1" 这类由 isLoopbackHost 负责
+  // IPv6 hextet 省略前导零，故 "fd" 实为 00fd（不是 ULA）——补零后再取高字节才正确
+  const padded = first.padStart(4, '0');
+  const hi = parseInt(padded.slice(0, 2), 16);
+  if (Number.isNaN(hi)) return false;
+  if (hi === 0xfc || hi === 0xfd) return true; // fc00::/7 ULA
+  if (hi === 0xfe) {
+    const lo = parseInt(padded.slice(2, 4), 16);
+    return lo >= 0x80 && lo <= 0xbf; // fe80::/10 链路本地
+  }
   return false;
 }
 
@@ -69,6 +98,7 @@ export function isAllowedHost(host: string, allowlist: string[]): boolean {
   if (!host) return false;
   if (isLoopbackHost(host)) return true;
   if (isPrivateIpv4(host)) return true;
+  if (isPrivateIpv6(host)) return true;
   for (const entry of allowlist) {
     if (entry === host) return true;
     // 通配子域：*.example.com 匹配任意子域（a.example.com），但不匹配裸 example.com。
@@ -80,16 +110,27 @@ export function isAllowedHost(host: string, allowlist: string[]): boolean {
   return false;
 }
 
+// 反代连面板时用的内部地址：IP 字面量、localhost、容器名 / 主机名这类单段名。
+// DNS 重绑定只能借攻击者控制的多段域名（evil.example.com）发起，Host 不可能是这几类。
+function isInternalUpstreamHost(host: string): boolean {
+  if (!host) return false;
+  const bare = host.startsWith('[') ? host.slice(1, -1) : host;
+  return isLoopbackHost(host) || isIP(bare) !== 0 || !bare.includes('.');
+}
+
 // 反代/CDN（Cloudflare、nginx、Caddy 等）部署时，真实对外域名可能在 X-Forwarded-Host 里，
-// 而 Host 被改写成内部地址。综合判定：Host 或 X-Forwarded-Host 任一在白名单即放行。
-// 安全性：DNS-rebinding 攻击者直连面板时，浏览器 fetch 无法设置 X-Forwarded-Host（禁止首部），
-// 故该首部只会由可信反代设置，不会被攻击者利用。
+// 而 Host 被改写成内部地址。Host 在白名单即放行；Host 是反代连面板用的内部地址时，再看 X-Forwarded-Host。
+// 安全性：X-Forwarded-Host 不是浏览器的禁止首部，DNS 重绑定页面的脚本（Host = 攻击者域名）自己就能加上
+// X-Forwarded-Host: 192.168.x.x。此前「Host 或 X-Forwarded-Host 任一在白名单即放行」，实测据此能用默认账号
+// 登录拿到会话、调用管理接口。所以 Host 是外部域名时一律不看 X-Forwarded-Host。
 export function isRequestHostAllowed(
   hostHeader: string | undefined,
   forwardedHostHeader: string | string[] | undefined,
   allowlist: string[],
 ): boolean {
-  if (isAllowedHost(parseHost(hostHeader), allowlist)) return true;
+  const host = parseHost(hostHeader);
+  if (isAllowedHost(host, allowlist)) return true;
+  if (!isInternalUpstreamHost(host)) return false;
   let xfh = Array.isArray(forwardedHostHeader) ? forwardedHostHeader[0] : forwardedHostHeader;
   if (xfh) {
     xfh = xfh.split(',')[0]; // 多级代理链取第一个（最初的客户端 Host）

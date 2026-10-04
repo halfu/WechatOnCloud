@@ -3,10 +3,10 @@
     "stepTitle": "管理员账号",
     "items": [
       {
-        "type": "string",
+        "type": "text",
         "field": "WOC_USER",
         "label": "管理员用户名",
-        "defaultValue": "admin",
+        "initValue": "admin",
         "rules": [{ "required": true, "message": "请输入管理员用户名" }]
       },
       {
@@ -21,16 +21,31 @@
     "stepTitle": "运行参数",
     "items": [
       {
-        "type": "string",
+        "type": "text",
         "field": "WOC_HTTP_PORT",
         "label": "对外访问端口",
-        "defaultValue": "36080"
+        "initValue": "36080"
       },
       {
-        "type": "string",
+        "type": "text",
         "field": "WOC_VERSION",
         "label": "镜像版本（建议钉到具体版本）",
-        "defaultValue": "latest"
+        "initValue": "latest"
+      }
+    ]
+  },
+  {
+    "stepTitle": "实例数据目录（可选）",
+    "items": [
+      {
+        "type": "tips",
+        "helpText": "留空 = 实例数据放在 Docker 数据卷里（默认，通常在系统盘）。填一个宿主机上的绝对路径（例如 /vol1/1000/woc）后，之后新建的实例会把登录状态、聊天记录、收到的文件放到「该目录/woc-data-<实例id>」，可以在飞牛文件管理里直接查看、取用，也方便放到大容量盘上。只影响之后新建的实例，已有实例保持原位置不动。路径只能包含字母、数字和 . _ - /，不能有空格或中文。"
+      },
+      {
+        "type": "text",
+        "field": "WOC_DATA_ROOT",
+        "label": "实例数据目录（宿主机绝对路径，可留空）",
+        "initValue": ""
       }
     ]
   }

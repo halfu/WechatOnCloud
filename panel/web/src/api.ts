@@ -19,11 +19,12 @@ export interface WechatStatus {
 }
 
 export type RuntimeState = 'running' | 'stopped' | 'missing';
-export type AppType = 'wechat' | 'telegram' | 'chromium' | 'custom';
+export type AppType = 'wechat' | 'telegram' | 'chromium' | 'qq' | 'custom';
 export const APP_LABELS: Record<AppType, string> = {
   wechat: '微信',
   telegram: 'Telegram',
   chromium: 'Chromium',
+  qq: 'QQ',
   custom: '自定义应用',
 };
 
@@ -41,6 +42,7 @@ export const APP_PROFILES: Record<AppType, AppProfile> = {
   wechat: { label: '微信', needsInstall: true, enterHint: '首次进入请扫码登录微信', updateLabel: '更新微信' },
   telegram: { label: 'Telegram', needsInstall: true, enterHint: '首次进入请登录 Telegram', updateLabel: '更新 Telegram' },
   chromium: { label: 'Chromium', needsInstall: false, enterHint: '浏览器已就绪，直接使用即可', updateLabel: '' },
+  qq: { label: 'QQ', needsInstall: true, enterHint: '首次进入请用手机 QQ 扫码登录', updateLabel: '更新 QQ' },
   custom: { label: '自定义应用', needsInstall: true, enterHint: '', updateLabel: '更新' },
 };
 export const appProfile = (t?: AppType): AppProfile => APP_PROFILES[t ?? 'wechat'] ?? APP_PROFILES.wechat;
@@ -66,6 +68,7 @@ export interface MemLimits {
 export interface InstanceWithStatus extends PanelInstance {
   runtime: RuntimeState;
   wechat: WechatStatus;
+  imageVersion?: string | null; // 实例镜像版本（CI 发布版如 "1.4.0"；自构建为镜像短 id；容器缺失为 null）
 }
 
 export interface VolEntry {
@@ -76,31 +79,134 @@ export interface VolEntry {
 }
 
 export interface VersionInfo {
-  current: string; // 当前构建版本（如 v1.2.0 / dev）
+  current: string; // 当前构建版本（如 v1.2.0 / dev-<sha>）
   latest: string | null; // 仓库上最新发布版（如 v1.2.1）；查不到为 null
-  hasUpdate: boolean; // 有更高的语义化版本可用
+  hasUpdate: boolean; // 有可升级目标（正式版：latest>current；开发版：查到任一正式版）
+  isDev: boolean; // 当前是开发版（非正式 vX.Y.Z）
   checkedAt: number; // 上次检查时间戳（ms）；0=尚未检查
   source: string | null; // 数据来源：dockerhub / ghcr / dockerhub+ghcr
   error: string | null; // 检查失败原因
 }
 
-// 原始二进制上传（File 直传 application/octet-stream），用于数据卷上传/解压/恢复
-async function rawUpload(url: string, file: File): Promise<any> {
-  const res = await fetch(url, {
-    method: 'POST',
-    credentials: 'same-origin',
-    headers: { 'content-type': 'application/octet-stream' },
-    body: file,
+// 反代身份网关（Cloudflare Access / Authelia 等）会话过期时，会把 API 请求 302 到它的跨域登录页；
+// 默认的 fetch 会跟随这个跨域跳转、被浏览器按 CORS 拦下，前端只看到 "Failed to fetch"，页面卡死
+// （PR #108 反馈的场景）。面板自己的 /api 从不返回重定向，所以用 redirect:'manual'：只要拿到
+// opaqueredirect，就一定是网关拦了，整页重载交给网关重新认证后再回来。
+// 刻意不把「网络失败」当成会话过期（PR #108 原方案）：面板重启 / 自更新期间 API 本就短暂不通，
+// 那时整页跳转会停在浏览器的「无法访问」错误页，再也不会自动恢复。
+const REAUTH_KEY = 'woc_gateway_reauth_ts';
+// 重载前先注销 PWA 的 Service Worker：它会拦截页面导航、直接从缓存返回页面，请求根本到不了网关，
+// 网关就没机会重新认证（实测：重载后仍被 302，最后落到 /login）。只在这一刻注销，下次正常加载时
+// SW 会自动重新注册，已安装为应用（Chrome 应用 / 添加到主屏幕）的用户不受影响（PR #109 是直接删掉 PWA）。
+function reloadThroughGateway() {
+  const go = () => window.location.reload();
+  if (!('serviceWorker' in navigator)) return go();
+  navigator.serviceWorker
+    .getRegistrations()
+    .then((rs) => Promise.all(rs.map((r) => r.unregister())))
+    .catch(() => {})
+    .finally(go);
+}
+async function apiFetch(input: string, init: RequestInit = {}): Promise<Response> {
+  const res = await fetch(input, { ...init, redirect: 'manual' });
+  if (res.type === 'opaqueredirect') {
+    let last = 0;
+    try {
+      last = Number(sessionStorage.getItem(REAUTH_KEY) || 0);
+      if (Date.now() - last > 10_000) sessionStorage.setItem(REAUTH_KEY, String(Date.now()));
+    } catch {
+      /* 隐私模式：不做节流，照常重载 */
+    }
+    // 10s 内只重载一次：网关若配置异常一直 302，也不会陷入无限刷新
+    if (Date.now() - last > 10_000) reloadThroughGateway();
+    throw new Error('访问会话已失效，正在重新验证…');
+  }
+  return res;
+}
+
+// ---------- 大文件上传 ----------
+// 与服务端 index.ts 的 UPLOAD_LIMIT_* 一致。前端先比一下：超限时服务端会直接回 413 并断开连接，
+// 浏览器此时往往只报「网络错误」，看不到原因。
+const GB = 1024 ** 3;
+export const UPLOAD_LIMITS = { transfer: 4 * GB, volumeFile: 20 * GB, archive: 100 * GB };
+export function assertUploadSize(file: Blob, limit: number) {
+  if (file.size > limit) throw new Error(`文件太大（${fmtUploadSize(file.size)}，上限 ${fmtUploadSize(limit)}）`);
+}
+export function fmtUploadSize(n: number): string {
+  if (n >= GB) return `${(n / GB).toFixed(1)} GB`;
+  if (n >= 1024 ** 2) return `${Math.round(n / 1024 ** 2)} MB`;
+  return `${Math.max(1, Math.round(n / 1024))} KB`;
+}
+export type UploadProgress = (loaded: number, total: number) => void;
+
+function uploadHttpError(status: number): string {
+  if (status === 413) return '文件太大：超过了上传上限，或反向代理限制了上传大小（nginx 需调大 client_max_body_size）';
+  if (status === 502 || status === 504) return `上传失败（HTTP ${status}）：反向代理超时，或面板正在重启`;
+  return `上传失败（HTTP ${status}）`;
+}
+
+// 原始二进制上传（File 直传 application/octet-stream），带上传进度（fetch 拿不到上传进度，这里用 XHR）
+async function rawUpload(url: string, file: Blob, onProgress?: UploadProgress): Promise<any> {
+  // 先发个普通请求探路：登录已失效、或反代身份网关要重新认证（apiFetch 会整页重载去认证）时，在这里就拦下，
+  // 不至于几个 GB 传完才发现被挡在门外
+  const probe = await apiFetch('/api/auth/me', { credentials: 'same-origin' });
+  if (probe.status === 401) {
+    location.assign('/login');
+    throw new Error('登录已失效，请重新登录');
+  }
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', url);
+    xhr.setRequestHeader('content-type', 'application/octet-stream');
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) onProgress?.(e.loaded, e.total);
+    };
+    xhr.onload = () => {
+      let data: any = null;
+      try {
+        data = JSON.parse(xhr.responseText || 'null');
+      } catch {
+        /* 反代的错误页不是 JSON */
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        // 2xx 却不是面板的回应（被网关换成了登录页之类）：不能当成功
+        if (data && data.ok) resolve(data);
+        else reject(new Error('上传结果未知（收到的不是面板的响应），请刷新页面后检查'));
+        return;
+      }
+      reject(new Error(data?.error || uploadHttpError(xhr.status)));
+    };
+    xhr.onerror = () => reject(new Error('上传失败：连接中断（网络断开，或反向代理限制了上传大小 / 时长）'));
+    xhr.onabort = () => reject(new Error('上传已取消'));
+    xhr.send(file);
   });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error((data as any).error || `请求失败 (${res.status})`);
-  return data;
+}
+
+// 解压 / 整卷恢复在服务端是后台任务：上传完拿到任务号，轮询到结束
+async function waitVolumeJob(id: string, job: string, onStage?: (stage: string) => void): Promise<void> {
+  let misses = 0;
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 1000));
+    let st: { state: 'running' | 'done' | 'error'; stage: string; error: string | null };
+    try {
+      st = await req(`/api/admin/instances/${id}/volume/jobs/${job}`);
+      misses = 0;
+    } catch (e: any) {
+      const msg = e?.message || '';
+      if (/任务不存在/.test(msg)) throw new Error('任务状态丢失（面板可能重启过），请检查数据后决定是否重试');
+      if (++misses > 60) throw new Error(`查询进度失败：${msg}`); // 网络抖动 / 面板重启中：多等一会儿
+      continue;
+    }
+    onStage?.(st.stage);
+    if (st.state === 'done') return;
+    if (st.state === 'error') throw new Error(st.error || '操作失败');
+  }
 }
 
 async function req<T = any>(path: string, opts: RequestInit = {}): Promise<T> {
   // 仅在有 body 时声明 JSON content-type：否则 Fastify 对「空 body + application/json」会报 400
   const headers = opts.body ? { 'content-type': 'application/json', ...opts.headers } : opts.headers;
-  const res = await fetch(path, {
+  const res = await apiFetch(path, {
     credentials: 'same-origin',
     ...opts,
     headers,
@@ -200,22 +306,42 @@ export const api = {
   instanceStart: (id: string) => req(`/api/admin/instances/${id}/start`, { method: 'POST' }),
   instanceStop: (id: string) => req(`/api/admin/instances/${id}/stop`, { method: 'POST' }),
   instanceRestart: (id: string) => req(`/api/admin/instances/${id}/restart`, { method: 'POST' }),
-  instanceUpgrade: (id: string) => req(`/api/admin/instances/${id}/upgrade`, { method: 'POST' }),
+  // 单实例升级：异步（后端登记后立即返回），轮询 upgradeStatus().upgradingIds 直到该 id 移出。
+  instanceUpgrade: (id: string) => req<{ ok: boolean; started: boolean }>(`/api/admin/instances/${id}/upgrade`, { method: 'POST' }),
+  // 实例镜像升级状态（哪些实例落后于本地最新镜像、远端是否有新版、单个/批量升级进度）。
+  upgradeStatus: () =>
+    req<{
+      known: boolean;
+      outdatedCount: number;
+      outdatedIds: string[];
+      instances: { id: string; name: string; outdated: boolean }[];
+      remoteNewer: boolean | null;
+      upgradeAll: { running: boolean; total: number; done: number; failed: number; phase: string };
+      upgradingIds: string[];
+    }>('/api/admin/instances/upgrade-status'),
+  // 一键升级全部（异步，立即返回；先拉镜像再判定落后，进度看 upgradeStatus().upgradeAll）。
+  upgradeAllInstances: () =>
+    req<{ ok: boolean; started: boolean }>('/api/admin/instances/upgrade-all', { method: 'POST' }),
   instanceLogsUrl: (id: string) => `/api/admin/instances/${id}/logs`,
   // 全局日志 / 诊断包（范围 24h/7d/30d/1y）
   diagnosticsUrl: (range: string) => `/api/admin/diagnostics?range=${encodeURIComponent(range)}`,
   panelLogUrl: (range: string) => `/api/admin/panel-log?range=${encodeURIComponent(range)}`,
 
   // 文件中转
-  listFiles: (id: string) => req<{ files: { name: string; size: number }[] }>(`/api/instances/${id}/files`),
-  uploadFile: async (id: string, file: File) => {
-    const res = await fetch(`/api/instances/${id}/upload?name=${encodeURIComponent(file.name)}`, {
+  listFiles: (id: string) => req<{ files: { name: string; size: number; mtime?: number }[] }>(`/api/instances/${id}/files`),
+  uploadFile: async (id: string, file: File, onProgress?: UploadProgress) => {
+    assertUploadSize(file, UPLOAD_LIMITS.transfer);
+    return rawUpload(`/api/instances/${id}/upload?name=${encodeURIComponent(file.name)}`, file, onProgress);
+  },
+  // 本机剪贴板图片 → 容器 X 剪贴板 → Ctrl+V（issue #91）
+  pasteImage: async (id: string, file: Blob) => {
+    const res = await apiFetch(`/api/instances/${id}/paste-image?type=${encodeURIComponent(file.type)}`, {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'content-type': 'application/octet-stream' },
       body: file,
     });
-    if (!res.ok) throw new Error(((await res.json().catch(() => ({}))) as any).error || '上传失败');
+    if (!res.ok) throw new Error(((await res.json().catch(() => ({}))) as any).error || '粘贴图片失败');
     return res.json();
   },
   downloadFileUrl: (id: string, name: string) => `/api/instances/${id}/download?name=${encodeURIComponent(name)}`,
@@ -233,17 +359,67 @@ export const api = {
   volumeDownloadUrl: (id: string, path: string) =>
     `/api/admin/instances/${id}/volume/download?path=${encodeURIComponent(path)}`,
   volumeBackupUrl: (id: string) => `/api/admin/instances/${id}/volume/backup`,
-  volumeUpload: (id: string, path: string, file: File) =>
-    rawUpload(`/api/admin/instances/${id}/volume/upload?path=${encodeURIComponent(path)}&name=${encodeURIComponent(file.name)}`, file),
-  volumeExtract: (id: string, path: string, file: File) =>
-    rawUpload(`/api/admin/instances/${id}/volume/extract?path=${encodeURIComponent(path)}`, file),
-  volumeRestore: (id: string, file: File) =>
-    rawUpload(`/api/admin/instances/${id}/volume/restore`, file),
+  volumeUpload: async (id: string, path: string, file: File, onProgress?: UploadProgress) => {
+    assertUploadSize(file, UPLOAD_LIMITS.volumeFile);
+    return rawUpload(
+      `/api/admin/instances/${id}/volume/upload?path=${encodeURIComponent(path)}&name=${encodeURIComponent(file.name)}`,
+      file,
+      onProgress,
+    );
+  },
+  // 上传（带进度）→ 服务端校验、写入（后台任务，onStage 报告阶段）
+  volumeExtract: async (id: string, path: string, file: File, onProgress?: UploadProgress, onStage?: (s: string) => void) => {
+    assertUploadSize(file, UPLOAD_LIMITS.archive);
+    const { job } = await rawUpload(`/api/admin/instances/${id}/volume/extract?path=${encodeURIComponent(path)}`, file, onProgress);
+    await waitVolumeJob(id, job, onStage);
+  },
+  volumeRestore: async (id: string, file: File, onProgress?: UploadProgress, onStage?: (s: string) => void) => {
+    assertUploadSize(file, UPLOAD_LIMITS.archive);
+    const { job } = await rawUpload(`/api/admin/instances/${id}/volume/restore`, file, onProgress);
+    await waitVolumeJob(id, job, onStage);
+  },
 
   // 多端协作：操作控制权
   controlStatus: (id: string) => req<{ free: boolean; mine: boolean; holder: string | null }>(`/api/instances/${id}/control`),
   controlBeat: (id: string) => req<{ mine: boolean; holder: string }>(`/api/instances/${id}/control/beat`, { method: 'POST' }),
   controlTake: (id: string) => req<{ mine: boolean; holder: string }>(`/api/instances/${id}/control/take`, { method: 'POST' }),
   typeInInstance: (id: string, text: string) => req(`/api/instances/${id}/type`, { method: 'POST', body: JSON.stringify({ text }) }),
+  // 本机剪贴板文字粘进应用（粘贴桥判断本机比容器新时用；贴完留在容器剪贴板）
+  pasteText: (id: string, text: string) => req(`/api/instances/${id}/paste-text`, { method: 'POST', body: JSON.stringify({ text }) }),
   keyInInstance: (id: string, key: string) => req(`/api/instances/${id}/key`, { method: 'POST', body: JSON.stringify({ key }) }),
+
+  // 桌面壁纸
+  listBackgrounds: (id: string) => req<{ backgrounds: string[] }>(`/api/admin/instances/${id}/backgrounds`),
+  uploadBackground: async (id: string, name: string, file: File) => {
+    const res = await apiFetch(`/api/admin/instances/${id}/backgrounds?name=${encodeURIComponent(name)}`, {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'content-type': 'application/octet-stream' }, body: file,
+    });
+    if (!res.ok) throw new Error(((await res.json().catch(() => ({}))) as any).error || '上传失败');
+    return res.json();
+  },
+  applyBackground: (id: string, name: string) =>
+    req(`/api/admin/instances/${id}/backgrounds/${encodeURIComponent(name)}/apply`, { method: 'POST' }),
+  deleteBackground: (id: string, name: string) =>
+    req(`/api/admin/instances/${id}/backgrounds/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+  getCurrentBackground: (id: string) => req<{ background: string }>(`/api/admin/instances/${id}/backgrounds/current`),
+  clearBackground: (id: string) => req(`/api/admin/instances/${id}/backgrounds/clear`, { method: 'POST' }),
+
+  // 字体管理
+  listFonts: (id: string) => req<{ fonts: string[] }>(`/api/admin/instances/${id}/fonts`),
+  uploadFont: async (id: string, name: string, file: File) => {
+    const res = await apiFetch(`/api/admin/instances/${id}/fonts?name=${encodeURIComponent(name)}`, {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'content-type': 'application/octet-stream' }, body: file,
+    });
+    if (!res.ok) throw new Error(((await res.json().catch(() => ({}))) as any).error || '上传失败');
+    return res.json();
+  },
+  deleteFont: (id: string, name: string) =>
+    req(`/api/admin/instances/${id}/fonts/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+  getCurrentFont: (id: string) => req<{ fontFile: string }>(`/api/admin/instances/${id}/fonts/current`),
+  applyFont: (id: string, name: string) =>
+    req(`/api/admin/instances/${id}/fonts/${encodeURIComponent(name)}/apply`, { method: 'POST' }),
+  resetFontDefault: (id: string) =>
+    req(`/api/admin/instances/${id}/fonts/default`, { method: 'POST' }),
 };

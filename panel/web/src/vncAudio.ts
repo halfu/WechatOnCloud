@@ -14,20 +14,26 @@
 
 // kclient 服务端用的 socket.io 版本未知，为避免协议不匹配，动态加载它自带的 socket.io.js
 // （经反代取 /desktop/<id>/audio/socket.io/socket.io.js），用全局 io，而非打包我们自己的版本。
+// 注意：_wocPromise 必须在 Promise 构造完之后再挂——执行器是同步跑的，在里面引用 p 会撞上暂时性死区，
+// 抛 ReferenceError 让这次加载直接失败（此前第一次开「声音」必然无声，关掉再开才有）。
+// 加载失败时移除 script，下次开声音能重新加载，而不是永远拿到同一个失败的 Promise。
 function loadIo(id: string): Promise<any> {
   const w = window as any;
   if (w.io) return Promise.resolve(w.io);
   const existing = document.getElementById('woc-socketio') as HTMLScriptElement | null;
   if (existing && (existing as any)._wocPromise) return (existing as any)._wocPromise;
+  const s = document.createElement('script');
+  s.id = 'woc-socketio';
+  s.src = `/desktop/${encodeURIComponent(id)}/audio/socket.io/socket.io.js`;
   const p = new Promise<any>((resolve, reject) => {
-    const s = document.createElement('script');
-    s.id = 'woc-socketio';
-    s.src = `/desktop/${encodeURIComponent(id)}/audio/socket.io/socket.io.js`;
-    s.onload = () => ((window as any).io ? resolve((window as any).io) : reject(new Error('io 未就绪')));
-    s.onerror = () => reject(new Error('加载 socket.io 失败'));
-    document.head.appendChild(s);
-    (s as any)._wocPromise = p;
+    s.onload = () => (w.io ? resolve(w.io) : reject(new Error('io 未就绪')));
+    s.onerror = () => {
+      s.remove();
+      reject(new Error('加载 socket.io 失败'));
+    };
   });
+  (s as any)._wocPromise = p;
+  document.head.appendChild(s);
   return p;
 }
 
@@ -154,6 +160,12 @@ export class VncAudio {
     });
     this.socket.on('connect', () => {
       if (this.active) this.open();
+    });
+    // 关键：断线必须复位 opened，否则重连后 open() 以为已经开过、跳过 emit('open')，
+    // 服务端(kclient)永远不会重新开始推流 → 实例升级/重启/面板更新/网络抖动后全程静音
+    //（用户反馈"声音大概率播放不出来"的主因）。复位后上面的 connect 处理器会重新 open。
+    this.socket.on('disconnect', () => {
+      this.opened = false;
     });
   }
 

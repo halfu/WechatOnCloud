@@ -8,49 +8,61 @@ FROM lscr.io/linuxserver/baseimage-kasmvnc:debianbookworm
 # 需的全部系统库（这些需 root/apt，必须 bake 进镜像）。
 ENV DEBIAN_FRONTEND=noninteractive
 
+# ⚠️ Chromium 版本锚定（架构守则 R1）——绝不跟随 Debian 滚动：
+# Debian 源只保留最新版 chromium，而新版本在本容器栈（KasmVNC/Xvnc + 软件渲染）上反复引入致命崩溃：
+#   · 149 收紧变换矩阵断言（叠加 DPI bug 全面崩溃，v1.4.0 已修 DPI）；
+#   · 150 「非首次启动」路径与 --start-maximized 直接 SIGTRAP → 浏览器实例必黑屏（无任何 flag 可绕）。
+# 故从 snapshot.debian.org 的固定快照安装验证过的版本。升级 chromium = 改下面两行（快照时间戳 + 版本号），
+# 并跑通 doc/dev/发布门禁.md 的全部探针、实际打开 Chromium 实例并重启一次看画面后才允许合并。
+# 两行不用手查：scripts/bump-chromium.py 会找 bookworm 最新构建、定出 amd64/arm64 都齐的快照并核对后改好。
+# 154.0.8037.57：门禁三项探针、同一 profile 反复重启（--start-maximized 正式参数）、容器重启后画面均正常。
+ARG CHROMIUM_SNAPSHOT=20260925T171425Z
+ARG CHROMIUM_VERSION=154.0.8037.57-1~deb12u1
+# ⚠️ CI 的 QEMU arm64 模拟下 apt-get update OOM（"Cannot allocate memory"，触发点是解析
+# download.docker.com InRelease）导致实例镜像发不出去。根因是 apt 要解析一大堆【构建根本用不到】
+# 的源（deb-src 源码索引、backports、docker、nodesource），内存峰值在模拟环境里爆掉。
+# 对策：构建期把 apt 源精简到只剩「debian main/updates/security（仅二进制）+ chromium 锚定快照」，
+# 装完再原样恢复；合并为单次 update+install；Languages=none 跳翻译、Retries 抗抖动。三管齐下从根上消除 OOM。
 RUN set -eux; \
-    # 中文字体（否则界面/消息显示方块）+ 语言环境 + 下载/解压工具
-    apt-get update; \
+    mkdir -p /woc-apt-bak; \
+    cp -a /etc/apt/sources.list /woc-apt-bak/; \
+    mv /etc/apt/sources.list.d/docker.list /etc/apt/sources.list.d/nodesource.list /woc-apt-bak/ 2>/dev/null || true; \
+    { \
+      echo "deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware"; \
+      echo "deb http://deb.debian.org/debian bookworm-updates main contrib non-free non-free-firmware"; \
+      echo "deb http://security.debian.org/debian-security/ bookworm-security main contrib non-free non-free-firmware"; \
+    } > /etc/apt/sources.list; \
+    echo "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/${CHROMIUM_SNAPSHOT}/ bookworm-security main" \
+      > /etc/apt/sources.list.d/woc-chromium-pin.list; \
+    printf 'Package: chromium*\nPin: version %s\nPin-Priority: 1001\n' "${CHROMIUM_VERSION}" \
+      > /etc/apt/preferences.d/woc-chromium-pin; \
+    apt-get -o Acquire::Languages=none -o Acquire::Retries=3 update; \
     apt-get install -y --no-install-recommends \
         curl ca-certificates locales dpkg \
         fonts-wqy-zenhei fonts-wqy-microhei fonts-noto-cjk fonts-noto-color-emoji \
         libnss3 libgbm1 libasound2 libxss1 \
         xz-utils \
-        chromium \
-        xdotool xclip; \
+        chromium="${CHROMIUM_VERSION}" \
+        xdotool xclip \
+        xwallpaper xsettingsd \
+        # 微信原生版是 Qt 程序，依赖一组 xcb 平台库；libxcb-cursor0 由 Qt 动态 dlopen，ldd 查不到，需主动装。
+        libatomic1 libxdamage1 libxkbcommon-x11-0 \
+        libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xkb1 libxcb-cursor0 \
+        # WeChatAppEx 是 Chromium 内核，需 GTK3 全家桶 + 一组 X 扩展 + cups
+        libgtk-3-0 libatk1.0-0 libatk-bridge2.0-0 libatspi2.0-0 libcups2 \
+        libxcomposite1 libxrandr2 libxfixes3 libxtst6 libxshmfence1 libdrm2; \
+    chromium --version; \
+    rm -f /etc/apt/sources.list.d/woc-chromium-pin.list /etc/apt/preferences.d/woc-chromium-pin; \
+    mv /woc-apt-bak/sources.list /etc/apt/sources.list; \
+    mv /woc-apt-bak/docker.list /woc-apt-bak/nodesource.list /etc/apt/sources.list.d/ 2>/dev/null || true; \
+    rm -rf /woc-apt-bak; \
     sed -i 's/# zh_CN.UTF-8 UTF-8/zh_CN.UTF-8 UTF-8/' /etc/locale.gen; \
     locale-gen; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/*
 
-# 微信运行时需要、但官方 deb 未声明的额外库（单独成层，避免动到上面缓存的安装层）。
-# 微信原生版是 Qt 程序，依赖一组 xcb 平台库；libxcb-cursor0 由 Qt 动态 dlopen，ldd 查不到，需主动装。
-RUN set -eux; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends \
-        libatomic1 \
-        libxdamage1 \
-        libxkbcommon-x11-0 \
-        libxcb-icccm4 \
-        libxcb-image0 \
-        libxcb-keysyms1 \
-        libxcb-render-util0 \
-        libxcb-xkb1 \
-        libxcb-cursor0 \
-        # WeChatAppEx 是 Chromium 内核，需 GTK3 全家桶 + 一组 X 扩展 + cups
-        libgtk-3-0 \
-        libatk1.0-0 \
-        libatk-bridge2.0-0 \
-        libatspi2.0-0 \
-        libcups2 \
-        libxcomposite1 \
-        libxrandr2 \
-        libxfixes3 \
-        libxtst6 \
-        libxshmfence1 \
-        libdrm2; \
-    apt-get clean; \
-    rm -rf /var/lib/apt/lists/*
+# 字体/字体配置目录都在会话 HOME=/config 下（数据卷，运行时才挂载），故不在此预建；
+# 由 autostart 在启动时按需 mkdir + 建 ~/.local/share/fonts → /config/.fonts 软链（见 docker/autostart）。
 
 ENV LANG=zh_CN.UTF-8 \
     LC_ALL=zh_CN.UTF-8 \

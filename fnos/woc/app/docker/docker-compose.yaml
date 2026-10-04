@@ -16,6 +16,8 @@ services:
       - PANEL_ADMIN_USER=${WOC_USER:-admin}
       - PANEL_ADMIN_PASSWORD=${WOC_PASSWORD:-wechat}
       - PANEL_DATA=/data/accounts.json
+      # 安装向导「实例数据目录」：新建实例的数据放到该宿主目录（#133）。留空 = Docker 数据卷。
+      - WOC_DATA_ROOT=${WOC_DATA_ROOT:-}
     volumes:
       - ./data-panel:/data
       - /var/run/docker.sock:/var/run/docker.sock
