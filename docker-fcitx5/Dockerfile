@@ -1,7 +1,7 @@
 ARG UPSTREAM_TAG=1.5.1
 FROM ghcr.io/gloridust/wechat-on-cloud:${UPSTREAM_TAG}
 
-# Install fcitx5, Chinese addons, IM frontends, and tint2 taskbar
+# Install fcitx5, Chinese addons, IM frontends, tint2 taskbar, and Metasequoia IME (MSIME / chinese-ime-lm)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       fcitx5 \
@@ -10,7 +10,15 @@ RUN apt-get update && \
       fcitx5-frontend-gtk3 \
       fcitx5-frontend-gtk4 \
       fcitx5-frontend-qt5 \
-      tint2 && \
+      tint2 \
+      curl \
+      ca-certificates \
+      python3 && \
+    curl -fsSL -o /tmp/msime.deb https://dl.msime.app/releases/msime/linux-v0.12.1/msime-linux_0.12.1_amd64.deb && \
+    apt-get install -y --no-install-recommends /tmp/msime.deb && \
+    rm -f /tmp/msime.deb && \
+    python3 /usr/bin/msime-linux-setup --download --resources /usr/share/msime-client/resources --no-register && \
+    curl -fsSL -o /usr/share/msime-client/resources/sentence-model-desktop.safetensors https://dl.msime.app/gh/https://github.com/metasequoiaime/chinese-ime-lm/releases/download/model-v1/sentence-model-desktop.safetensors && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
