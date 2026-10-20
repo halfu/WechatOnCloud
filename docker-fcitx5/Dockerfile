@@ -18,7 +18,7 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends /tmp/msime.deb && \
     rm -f /tmp/msime.deb && \
     python3 /usr/bin/msime-linux-setup --download --resources /usr/share/msime-client/resources --no-register && \
-    curl -fsSL -o /usr/share/msime-client/resources/sentence-model-desktop.safetensors https://dl.msime.app/gh/https://github.com/metasequoiaime/chinese-ime-lm/releases/download/model-v1/sentence-model-desktop.safetensors && \
+    curl -fsSL -o /usr/share/msime-client/sentence-model-desktop.safetensors https://dl.msime.app/gh/https://github.com/metasequoiaime/chinese-ime-lm/releases/download/model-v1/sentence-model-desktop.safetensors && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 

@@ -7,11 +7,23 @@ export GLFW_IM_MODULE=ibus
 
 # Initialize MSIME state and models if not yet initialized
 if [ ! -f "$HOME/.config/msime-client/runtime-options.json" ]; then
-    mkdir -p "$HOME/.config"
+    rm -rf "$HOME/.config/msime-client"
     if command -v msime-linux-prepare >/dev/null 2>&1; then
-        msime-linux-prepare --installed --no-cloud-candidates "$HOME/.config/msime-client" >/dev/null 2>&1 || true
-        sed -i 's/"neural_desktop": false/"neural_desktop": true/g' "$HOME"/.config/msime-client/*.json 2>/dev/null || true
-        sed -i 's/"neural_keyboard": false/"neural_keyboard": true/g' "$HOME"/.config/msime-client/*.json 2>/dev/null || true
+        msime-linux-prepare --no-cloud-candidates --installed "$HOME/.config/msime-client" >/dev/null 2>&1 || true
+        if [ -f "$HOME/.config/msime-client/runtime-options.json" ]; then
+            sed -i 's/"neural_desktop": false/"neural_desktop": true/g' "$HOME"/.config/msime-client/*.json 2>/dev/null || true
+            sed -i 's/"neural_keyboard": false/"neural_keyboard": true/g' "$HOME"/.config/msime-client/*.json 2>/dev/null || true
+            if [ -f "/usr/share/msime-client/sentence-model-desktop.safetensors" ]; then
+                python3 -c '
+import json, os
+p = os.path.expanduser("~/.config/msime-client/runtime-options.json")
+if os.path.exists(p):
+    with open(p, "r") as f: d = json.load(f)
+    d["settled_model"] = "/usr/share/msime-client/sentence-model-desktop.safetensors"
+    with open(p, "w") as f: json.dump(d, f, indent=2)
+' 2>/dev/null || true
+            fi
+        fi
     fi
 fi
 
