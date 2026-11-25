@@ -11,7 +11,6 @@ fi
 # -RectThreads 4        : 4 parallel worker threads for low-latency WebP dirty-rect compression
 # -FrameRate 24         : Cap at 24 FPS to eliminate WAN/EasyTier TCP bufferbloat
 # -VideoArea 100        : Prevent accidental switch into full-screen continuous video stream mode
-# -VideoTime 3600       : Keep pure dirty-rectangle + CopyRect mode active
 # -ScrollDetectLimit 10 : Trigger CopyRect hardware scroll when >=10% of screen scrolls (e.g. chat pane)
 # -DynamicQualityMin 6  : Responsive lightweight frames during active scrolling/dragging
 # -DynamicQualityMax 8  : High quality for normal updates
@@ -31,7 +30,6 @@ exec s6-setuidgid abc \
     -RectThreads 4 \
     -FrameRate 24 \
     -VideoArea 100 \
-    -VideoTime 3600 \
     -ScrollDetectLimit 10 \
     -DynamicQualityMin 6 \
     -DynamicQualityMax 8 \

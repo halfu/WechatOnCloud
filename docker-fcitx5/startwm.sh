@@ -1,5 +1,14 @@
 #!/usr/bin/env bash
 
+# Wait for X11 display socket to be ready before spawning session daemons
+XNUM="${DISPLAY#:}"
+XNUM="${XNUM%%.*}"
+for _i in $(seq 1 30); do
+    [ -S "/tmp/.X11-unix/X${XNUM}" ] && break
+    sleep 0.5
+done
+[ -S "/tmp/.X11-unix/X${XNUM}" ] || exit 1
+
 # Enable Nvidia GPU support if detected
 if which nvidia-smi >/dev/null 2>&1; then
   export LIBGL_KOPPER_DRI2=1
@@ -82,7 +91,8 @@ if command -v fcitx5 >/dev/null 2>&1; then
     (
         export DISPLAY="${DISPLAY:-:1}"
         export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-}"
-        while sleep 3; do
+        WM_PID=$$
+        while kill -0 "$WM_PID" 2>/dev/null && sleep 3; do
             if ! pgrep -u abc fcitx5 >/dev/null 2>&1; then
                 fcitx5 -d >/dev/null 2>&1 &
             fi
@@ -95,4 +105,4 @@ if [ -x /usr/local/bin/woc-pointer-watchdog.py ]; then
     pgrep -u abc -f woc-pointer-watchdog.py >/dev/null 2>&1 || /usr/local/bin/woc-pointer-watchdog.py >/tmp/woc-pointer-watchdog.log 2>&1 &
 fi
 
-/usr/bin/openbox-session
+exec /usr/bin/openbox-session
