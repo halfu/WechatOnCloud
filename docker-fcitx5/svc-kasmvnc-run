@@ -1,0 +1,42 @@
+#!/usr/bin/with-contenv bash
+
+# Force software rendering (disable -hw3d to prevent Intel Arc A380 Xvnc memory leak)
+DISABLE_DRI=1
+if [ -z ${DRINODE+x} ]; then
+  DRINODE="/dev/dri/renderD128"
+fi
+
+# Optimized KasmVNC flags (Plan A):
+# -CompareFB 1          : Always perform pixel-level framebuffer deduplication (0 bytes on fake X11 damage)
+# -RectThreads 4        : 4 parallel worker threads for low-latency WebP dirty-rect compression
+# -FrameRate 24         : Cap at 24 FPS to eliminate WAN/EasyTier TCP bufferbloat
+# -VideoArea 100        : Prevent accidental switch into full-screen continuous video stream mode
+# -VideoTime 3600       : Keep pure dirty-rectangle + CopyRect mode active
+# -ScrollDetectLimit 10 : Trigger CopyRect hardware scroll when >=10% of screen scrolls (e.g. chat pane)
+# -DynamicQualityMin 6  : Responsive lightweight frames during active scrolling/dragging
+# -DynamicQualityMax 8  : High quality for normal updates
+# -TreatLossless 8      : Refine static text regions losslessly once motion stops
+# -IdleTimeout 1200     : Drop idle VNC stream after 20m of no mouse/keyboard input (app stays online)
+exec s6-setuidgid abc \
+  /usr/local/bin/Xvnc $DISPLAY \
+    -PublicIP 127.0.0.1 \
+    -disableBasicAuth \
+    -SecurityTypes None \
+    -AlwaysShared \
+    -http-header Cross-Origin-Embedder-Policy=require-corp \
+    -http-header Cross-Origin-Opener-Policy=same-origin \
+    -geometry 1024x768 \
+    -sslOnly 0 \
+    -CompareFB 1 \
+    -RectThreads 4 \
+    -FrameRate 24 \
+    -VideoArea 100 \
+    -VideoTime 3600 \
+    -ScrollDetectLimit 10 \
+    -DynamicQualityMin 6 \
+    -DynamicQualityMax 8 \
+    -TreatLossless 8 \
+    -IdleTimeout 1200 \
+    -websocketPort 6901 \
+    -interface 0.0.0.0 \
+    -Log *:stdout:10

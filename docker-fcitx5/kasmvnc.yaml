@@ -1,0 +1,39 @@
+network:
+  protocol: http
+  interface: 0.0.0.0
+  websocket_port: 6901
+  use_ipv4: true
+  use_ipv6: true
+  udp:
+    public_ip: auto
+    port: auto
+    stun_server: auto
+  ssl:
+    pem_certificate: /config/ssl/cert.pem
+    pem_key: /config/ssl/cert.key
+    require_ssl: false
+
+user_session:
+  idle_timeout: 1200
+
+encoding:
+  max_frame_rate: 24
+  full_frame_updates: none
+  compare_framebuffer: always
+  rect_encoding_mode:
+    min_quality: 6
+    max_quality: 8
+    consider_lossless_quality: 8
+    rectangle_compress_threads: 4
+  video_encoding_mode:
+    enter_video_encoding_mode:
+      time_threshold: 3600
+      area_threshold: 100%
+
+logging:
+  log_writer_name: all
+  log_dest: logfile
+  level: 1
+
+command_line:
+  prompt: false

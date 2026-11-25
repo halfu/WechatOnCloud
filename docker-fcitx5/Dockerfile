@@ -1,7 +1,7 @@
 ARG UPSTREAM_TAG=1.5.1
 FROM ghcr.io/gloridust/wechat-on-cloud:${UPSTREAM_TAG}
 
-# Install fcitx5, Chinese addons, IM frontends, tint2 taskbar, xcompmgr compositor, and Metasequoia IME (MSIME / chinese-ime-lm)
+# Install fcitx5, Chinese addons, IM frontends, tint2 taskbar, xcompmgr compositor, xdotool, and Metasequoia IME (MSIME / chinese-ime-lm)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       fcitx5 \
@@ -12,6 +12,7 @@ RUN apt-get update && \
       fcitx5-frontend-qt5 \
       tint2 \
       xcompmgr \
+      xdotool \
       curl \
       ca-certificates \
       python3 && \
@@ -30,12 +31,15 @@ ENV GTK_IM_MODULE=fcitx \
     SDL_IM_MODULE=fcitx \
     GLFW_IM_MODULE=ibus
 
-# Copy configuration and startup scripts
+# Copy configuration, KasmVNC pure dirty-rect optimization, and watchdog scripts
 COPY profile /etc/xdg/fcitx5/profile
 COPY classicui.conf /etc/xdg/fcitx5/conf/classicui.conf
 COPY autostart /etc/xdg/openbox/autostart
 COPY fcitx5.sh /etc/profile.d/fcitx5.sh
 COPY startwm.sh /defaults/startwm.sh
+COPY kasmvnc.yaml /etc/kasmvnc/kasmvnc.yaml
+COPY svc-kasmvnc-run /etc/s6-overlay/s6-rc.d/svc-kasmvnc/run
+COPY woc-pointer-watchdog.py /usr/local/bin/woc-pointer-watchdog.py
 COPY patch-qq.py /tmp/patch-qq.py
 
 RUN python3 /tmp/patch-qq.py && rm -f /tmp/patch-qq.py && \
@@ -43,4 +47,4 @@ RUN python3 /tmp/patch-qq.py && rm -f /tmp/patch-qq.py && \
     sed -i 's/^wm_menu = .*/wm_menu = 0/g' /etc/xdg/tint2/tint2rc 2>/dev/null || true && \
     sed -i 's/^panel_layer = .*/panel_layer = bottom/g' /etc/xdg/tint2/tint2rc 2>/dev/null || true
 
-RUN chmod +x /etc/xdg/openbox/autostart /defaults/startwm.sh
+RUN chmod +x /etc/xdg/openbox/autostart /defaults/startwm.sh /etc/s6-overlay/s6-rc.d/svc-kasmvnc/run /usr/local/bin/woc-pointer-watchdog.py

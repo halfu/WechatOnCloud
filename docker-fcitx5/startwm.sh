@@ -14,6 +14,19 @@ export XMODIFIERS=@im=fcitx
 export SDL_IM_MODULE=fcitx
 export GLFW_IM_MODULE=ibus
 
+# If WeChat is already running (e.g. Openbox was respawned by watchdog), just exec openbox cleanly
+if pgrep -u abc -x wechat >/dev/null 2>&1; then
+    exec /usr/bin/openbox
+fi
+
+# Clean stale session-bus files and launch a single deterministic D-Bus session
+rm -rf /config/.dbus/session-bus/* 2>/dev/null || true
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] || ! [ -S "${DBUS_SESSION_BUS_ADDRESS#unix:path=}" ]; then
+    eval $(dbus-launch --sh-syntax)
+    export DBUS_SESSION_BUS_ADDRESS
+    export DBUS_SESSION_BUS_PID
+fi
+
 # Initialize MSIME state and models if not yet initialized
 if [ ! -f "$HOME/.config/msime-client/runtime-options.json" ]; then
     rm -rf "$HOME/.config/msime-client"
@@ -63,9 +76,23 @@ if command -v xcompmgr >/dev/null 2>&1; then
     pgrep -u abc xcompmgr >/dev/null 2>&1 || xcompmgr &
 fi
 
-if [ -z "unix:path=/run/user/1000/bus" ]; then
-    dbus_file=$(ls -t /config/.dbus/session-bus/*-1 2>/dev/null | head -n 1)
-    [ -n "$dbus_file" ] && . "$dbus_file"
+# Start fcitx5 and watchdog (auto-recover if fcitx5 ever exits)
+if command -v fcitx5 >/dev/null 2>&1; then
+    pgrep -u abc fcitx5 >/dev/null 2>&1 || fcitx5 -d &
+    (
+        export DISPLAY="${DISPLAY:-:1}"
+        export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-}"
+        while sleep 3; do
+            if ! pgrep -u abc fcitx5 >/dev/null 2>&1; then
+                fcitx5 -d >/dev/null 2>&1 &
+            fi
+        done
+    ) &
+fi
+
+# Start X11 frozen-pointer watchdog (auto-recovers hung openbox sync grab)
+if [ -x /usr/local/bin/woc-pointer-watchdog.py ]; then
+    pgrep -u abc -f woc-pointer-watchdog.py >/dev/null 2>&1 || /usr/local/bin/woc-pointer-watchdog.py >/tmp/woc-pointer-watchdog.log 2>&1 &
 fi
 
 /usr/bin/openbox-session
